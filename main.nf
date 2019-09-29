@@ -35,6 +35,7 @@ def helpMessage() {
     References                      If not specified in the configuration file or you wish to overwrite any of the references.
       --star_index                  Path to STAR index
       --hisat2_index                Path to HiSAT2 index
+      --bowtie2_index               Path to Bowtie2 index
       --fasta                       Path to Fasta reference
       --gtf                         Path to GTF file
       --gff                         Path to GFF3 file
@@ -98,6 +99,7 @@ if (params.genomes && params.genome && !params.genomes.containsKey(params.genome
 // Reference index path configuration
 // Define these here - after the profiles are loaded with the iGenomes paths
 params.star_index = params.genome ? params.genomes[ params.genome ].star ?: false : false
+params.bowtie2_index = params.genome ? params.genomes[ params.genome ].bowtie2 ?: false : false
 params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 params.gtf = params.genome ? params.genomes[ params.genome ].gtf ?: false : false
 params.gff = params.genome ? params.genomes[ params.genome ].gff ?: false : false
@@ -132,13 +134,18 @@ if (params.pico){
 }
 
 // Validate inputs
-if (params.aligner != 'star' && params.aligner != 'hisat2'){
-    exit 1, "Invalid aligner option: ${params.aligner}. Valid options: 'star', 'hisat2'"
+if (params.aligner != 'star' && params.aligner != 'hisat2' && params.aligner != 'bowtie2'){
+    exit 1, "Invalid aligner option: ${params.aligner}. Valid options: 'star', 'hisat2', 'bowtie2'"
 }
 if( params.star_index && params.aligner == 'star' ){
     star_index = Channel
         .fromPath(params.star_index)
         .ifEmpty { exit 1, "STAR index not found: ${params.star_index}" }
+}
+else if ( params.bowtie2_index && params.aligner == 'bowtie2' ){                  
+    bt2_indices = Channel                                                       
+        .fromPath("${params.bowtie2_index}*")                                    
+        .ifEmpty { exit 1, "Bowtie2 index not found: ${params.bowtie2_index}" }   
 }
 else if ( params.hisat2_index && params.aligner == 'hisat2' ){
     hs2_indices = Channel
@@ -148,7 +155,7 @@ else if ( params.hisat2_index && params.aligner == 'hisat2' ){
 else if ( params.fasta ){
     Channel.fromPath(params.fasta)
            .ifEmpty { exit 1, "Fasta file not found: ${params.fasta}" }
-           .into { ch_fasta_for_star_index; ch_fasta_for_hisat_index}
+           .into { ch_fasta_for_star_index; ch_fasta_for_hisat_index; ch_fasta_for_bowtie2_index}
 }
 else {
     exit 1, "No reference genome specified!"
@@ -357,6 +364,30 @@ if(params.aligner == 'star' && !params.star_index && params.fasta){
         """
     }
 }
+
+/*                                                                              
+ * PREPROCESSING - Build Bowtie2 index                                             
+ */                                                                             
+if(params.aligner == 'bowtie2' && !params.bowtie2_index && params.fasta){             
+    process makeBowtie2index {                                                     
+        label 'low_memory'                                                     
+        tag "$fasta"                                                            
+        publishDir path: { params.saveReference ? "${params.outdir}/reference_genome" : params.outdir },
+                   saveAs: { params.saveReference ? it : null }, mode: 'copy'   
+                                                                                
+        input:                                                                  
+        file fasta from ch_fasta_for_bowtie2_index
+                                                                                
+        output:                                                                 
+        file "bowtie2" into bowtie2_index                                             
+                                                                                
+        script:
+        """
+        bowtie2-build $fasta bowtie2/genome                                                          
+        """                                                                     
+    }                                                                           
+}
+
 /*
  * PREPROCESSING - Build HISAT2 splice sites file
  */
@@ -704,6 +735,68 @@ if(params.aligner == 'hisat2'){
             -@ ${task.cpus} ${avail_mem} \\
             -o ${hisat2_bam.baseName}.sorted.bam
         samtools index ${hisat2_bam.baseName}.sorted.bam
+        """
+    }
+}
+
+/*
+ * STEP 3i - align with Bowtie2
+ */
+if(params.aligner == 'bowtie2'){
+    bowtie2_log = Channel.from(false)
+    process bowtie22Align {
+        label 'high_memory'
+        tag "$prefix"
+        publishDir "${params.outdir}/bowtie2", mode: 'copy'
+
+        input:
+        file reads from trimmed_reads
+        file bt2_indices from bt2_indices.collect()
+
+        output:
+        file "${prefix}.bam" into bowtie2_bam
+        file "${prefix}.metfile"
+
+        script:
+        index_base = bt2_indices[0].toString() - ~/.\d.bt2?/
+        prefix = reads[0].toString() - ~/(_R1)?(_trimmed)?(_val_1)?(\.fq)?(\.fastq)?(\.gz)?$/
+        seqCenter = params.seqCenter ? "--rg-id ${prefix} --rg CN:${params.seqCenter.replaceAll('\\s','_')}" : ''
+        if (params.singleEnd) {
+            """
+            bowtie2 --end-to-end --no-mixed --no-discordant --met-file ${prefix}.metfile -x $index_base \\
+                   -U $reads -p ${task.cpus} --met-stderr $seqCenter \\
+                   | samtools view -bS -F 4 -F 256 - > ${prefix}.bam
+            """
+        } else {
+            """
+            bowtie2 --end-to-end --no-mixed --no-discordant --met-file ${prefix}.metfile -X 1000 -x $index_base \\
+                   -1 ${reads[0]} -2 ${reads[1]} -p ${task.cpus} --met-stderr $seqCenter \\
+                   | samtools view -bS -F 4 -F 8 -F 256 - > ${prefix}.bam
+            """
+        }
+    }
+
+    process bowtie2_sortOutput {
+        label 'mid_memory'
+        tag "${bowtie2_bam.baseName}"
+        publishDir "${params.outdir}/bowtie2", mode: 'copy'
+
+        input:
+        file bowtie2_bam
+
+        output:
+        file "${bowtie2_bam.baseName}.sorted.bam" into bam_count, bam_rseqc, bam_preseq, bam_markduplicates, bam_featurecounts, bam_stringtieFPKM, bam_forSubsamp, bam_skipSubsamp
+        file "${bowtie2_bam.baseName}.sorted.bam.bai" into bam_index_rseqc, bam_index_genebody
+
+        script:
+        def suff_mem = ("${(task.memory.toBytes() - 6000000000) / task.cpus}" > 2000000000) ? 'true' : 'false'
+        def avail_mem = (task.memory && suff_mem) ? "-m" + "${(task.memory.toBytes() - 6000000000) / task.cpus}" : ''
+        """
+        samtools sort \\
+            $bowtie2_bam \\
+            -@ ${task.cpus} ${avail_mem} \\
+            -o ${bowtie2_bam.baseName}.sorted.bam
+        samtools index ${bowtie2_bam.baseName}.sorted.bam
         """
     }
 }

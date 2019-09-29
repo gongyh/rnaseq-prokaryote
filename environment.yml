@@ -10,6 +10,7 @@ dependencies:
   - trim-galore=0.5.0
   - star=2.6.1d # don't upgrade me - 2.7X indices incompatible with iGenomes.
   - hisat2=2.1.0
+  - bowtie2=2.3.5
   - picard=2.18.27
   - bioconductor-dupradar=1.12.1
   - conda-forge::r-data.table=1.12.0
