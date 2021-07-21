@@ -379,11 +379,11 @@ if(params.aligner == 'bowtie2' && !params.bowtie2_index && params.fasta){
         file fasta from ch_fasta_for_bowtie2_index
                                                                                 
         output:                                                                 
-        file "bowtie2" into bowtie2_index                                             
+        file "genome.*" into bt2_indices                                             
                                                                                 
         script:
         """
-        bowtie2-build $fasta bowtie2/genome                                                          
+        bowtie2-build $fasta genome 
         """                                                                     
     }                                                                           
 }
@@ -468,7 +468,7 @@ if(params.gff){
 
       script:
       """
-      gffread $gff -T -o ${gff.baseName}.gtf
+      gffread $gff -T -F -o ${gff.baseName}.gtf
       """
   }
 }
@@ -755,6 +755,7 @@ if(params.aligner == 'bowtie2'){
 
         output:
         file "${prefix}.bam" into bowtie2_bam
+        file "${prefix}.bowtie2_summary.txt" into alignment_logs
         file "${prefix}.metfile"
 
         script:
@@ -764,13 +765,13 @@ if(params.aligner == 'bowtie2'){
         if (params.singleEnd) {
             """
             bowtie2 --end-to-end --no-mixed --no-discordant --met-file ${prefix}.metfile -x $index_base \\
-                   -U $reads -p ${task.cpus} --met-stderr $seqCenter \\
+                   -U $reads -p ${task.cpus} --met-stderr $seqCenter 2> ${prefix}.bowtie2_summary.txt \\
                    | samtools view -bS -F 4 -F 256 - > ${prefix}.bam
             """
         } else {
             """
             bowtie2 --end-to-end --no-mixed --no-discordant --met-file ${prefix}.metfile -X 1000 -x $index_base \\
-                   -1 ${reads[0]} -2 ${reads[1]} -p ${task.cpus} --met-stderr $seqCenter \\
+                   -1 ${reads[0]} -2 ${reads[1]} -p ${task.cpus} --met-stderr $seqCenter 2> ${prefix}.bowtie2_summary.txt \\
                    | samtools view -bS -F 4 -F 8 -F 256 - > ${prefix}.bam
             """
         }
